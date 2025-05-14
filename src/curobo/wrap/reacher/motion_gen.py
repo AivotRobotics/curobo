@@ -2771,7 +2771,7 @@ class MotionGen(MotionGenConfig):
                 .item()
             )
 
-          if not self_collision_free:
+            if not self_collision_free:
                 # --- debug: compute exactly which links are colliding ---
                 # rebuild the kinematic state so that sphere positions get populated
                 state = self.rollout_fn.dynamics_model.forward(
@@ -2803,7 +2803,8 @@ class MotionGen(MotionGenConfig):
                 log_error(f"Self-collision detected on links: {offending_links}")
                 # --- end debug dump ---
                 return valid_query, MotionGenStatus.INVALID_START_STATE_SELF_COLLISION
-            status = MotionGenStatus.INVALID_START_STATE_UNKNOWN_ISSUE
+            else:
+                status = MotionGenStatus.INVALID_START_STATE_UNKNOWN_ISSUE
         return (valid_query, status)
 
     @profiler.record_function("motion_gen/ik")
