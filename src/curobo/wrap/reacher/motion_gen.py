@@ -2771,7 +2771,37 @@ class MotionGen(MotionGenConfig):
                 .item()
             )
 
-            if not self_collision_free:
+          if not self_collision_free:
+                # --- debug: compute exactly which links are colliding ---
+                # rebuild the kinematic state so that sphere positions get populated
+                state = self.rollout_fn.dynamics_model.forward(
+                    self.rollout_fn.start_state,
+                    joint_position  # shape [1,1,dof]
+                )
+                # tell the CUDA kernel to fill _sparse_sphere_idx
+                state.robot_spheres.requires_grad = True
+                self.rollout_fn.robot_self_collision_constraint.forward(
+                    state.robot_spheres
+                )
+                # a [1 × n_spheres] tensor where 1 marks a sphere in collision
+                sparse_idx = self.rollout_fn.robot_self_collision_constraint._sparse_sphere_idx.squeeze(1)
+                # count how many times each sphere index appears in collisions
+                offenses = sparse_idx.sum(dim=0)
+                offending_sphere_idxs = torch.nonzero(offenses).squeeze()
+ 
+                # map sphere→link
+                kin_cfg = self.robot_cfg.kinematics.kinematics_config
+                link_sphere_map = kin_cfg.link_sphere_idx_map   # tensor of length n_spheres
+                link_name_map   = kin_cfg.link_name_to_idx_map  # dict name→idx
+                idx2name       = {v:k for k,v in link_name_map.items()}
+ 
+                offending_link_idxs = link_sphere_map[offending_sphere_idxs]
+                offending_links = sorted({
+                    idx2name[int(li)]
+                    for li in offending_link_idxs
+                })
+                log_error(f"Self-collision detected on links: {offending_links}")
+                # --- end debug dump ---
                 return valid_query, MotionGenStatus.INVALID_START_STATE_SELF_COLLISION
             status = MotionGenStatus.INVALID_START_STATE_UNKNOWN_ISSUE
         return (valid_query, status)
