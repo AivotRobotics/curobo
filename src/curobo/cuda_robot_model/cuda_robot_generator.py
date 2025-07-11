@@ -626,14 +626,34 @@ class CudaRobotGenerator(CudaRobotGeneratorConfig):
             + [joint_data[j]["child"] for j in joint_data.keys()]
         )
 
-        for k in lock_joint_names:
-            if "mimic" in joint_data[k]:
-                mimic_link_names = [[x["parent"], x["child"]] for x in joint_data[k]["mimic"]]
-                mimic_link_names = [x for xs in mimic_link_names for x in xs]
-                lock_links += mimic_link_names
-        lock_links = list(set(lock_links))
+        print (f"Lock links: {lock_links}")
+        print (f"Lock joint names: {lock_joint_names}")
+        print (f"Joint data: {joint_data}")
+        print (f"chain_link_names: {chain_link_names}")
 
+
+        for joint in lock_joint_names[:]:  # iterate over a copy
+            if joint not in joint_data:
+                # no data → drop it from all our structures
+                print(f"joint {joint} not found, removing…")
+                lock_joint_names.remove(joint)
+                lock_joints.pop(joint, None)
+                self.lock_joints.pop(joint, None)
+            else:
+                if "mimic" in joint_data[joint]:
+                    mimic_link_names = [[x["parent"], x["child"]] for x in joint_data[joint]["mimic"]]
+                    mimic_link_names = [x for xs in mimic_link_names for x in xs]
+                    lock_links += mimic_link_names
+
+        lock_links = list(set(lock_links))
+        print (f"Lock links after: {lock_links}")
+        print (f"Lock joint names after: {lock_joint_names}")
+        print (f"lock_joints after: {lock_joints}")
         new_link_names = list(set(link_names + lock_links))
+
+        print (f"New link names: {new_link_names}")
+
+        print (f"Joint names: {self.joint_names}")
 
         # rebuild kinematic tree with link names added to link pose computation:
         self._build_kinematics_tensors(base_link, new_link_names, chain_link_names)
