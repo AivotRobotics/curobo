@@ -3330,6 +3330,14 @@ class MotionGen(MotionGenConfig):
             plan_config.partial_ik_opt,
             link_poses,
         )
+        # Print IK result details for debugging
+        print("[DEBUG] IKResult.success:", ik_result.success)
+        if hasattr(ik_result, 'status'):
+            print("[DEBUG] IKResult.status:", ik_result.status)
+        if hasattr(ik_result, 'error_message'):
+            print("[DEBUG] IKResult.error_message:", ik_result.error_message)
+        if hasattr(ik_result, 'solution'):
+            print("[DEBUG] IKResult.solution shape:", getattr(ik_result.solution, 'shape', None))
 
         if not plan_config.enable_graph and plan_config.partial_ik_opt:
             ik_result.success[:] = True
@@ -3345,6 +3353,14 @@ class MotionGen(MotionGenConfig):
             result.debug_info = {"ik_result": ik_result}
         ik_success = torch.count_nonzero(ik_result.success)
         if ik_success == 0:
+            print("[DEBUG] IK failed. IKResult details:")
+            print("[DEBUG] IKResult.success:", ik_result.success)
+            if hasattr(ik_result, 'status'):
+                print("[DEBUG] IKResult.status:", ik_result.status)
+            if hasattr(ik_result, 'error_message'):
+                print("[DEBUG] IKResult.error_message:", ik_result.error_message)
+            if hasattr(ik_result, 'solution'):
+                print("[DEBUG] IKResult.solution shape:", getattr(ik_result.solution, 'shape', None))
             result.status = MotionGenStatus.IK_FAIL
             return result
 
