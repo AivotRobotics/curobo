@@ -10,15 +10,15 @@
 ##
 
 model:
-  horizon: 30
+  horizon: 15
   state_filter_cfg:
     filter_coeff:
-      position: 0.1
-      velocity: 0.1
+      position: 0.3
+      velocity: 0.3
       acceleration: 0.0
     enable: True
   dt_traj_params:
-    base_dt: 0.01
+    base_dt: 0.05
     base_ratio: 0.5
     max_dt: 0.04
   vel_scale: 1.0
