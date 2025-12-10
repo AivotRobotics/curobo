@@ -199,7 +199,7 @@ class Obstacle:
         self,
         n_spheres: int = 1,
         surface_sphere_radius: float = 0.002,
-        fit_type: SphereFitType = SphereFitType.VOXEL_VOLUME_SAMPLE_SURFACE,
+        fit_type: SphereFitType = SphereFitType.VOXEL_SURFACE,
         voxelize_method: str = "ray",
         pre_transform_pose: Optional[Pose] = None,
         tensor_args: TensorDeviceType = TensorDeviceType(),
