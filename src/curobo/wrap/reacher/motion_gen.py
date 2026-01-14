@@ -38,6 +38,7 @@ from __future__ import annotations
 
 # Standard Library
 import math
+import os
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -78,6 +79,51 @@ from curobo.util_file import (
     join_path,
     load_yaml,
 )
+
+
+# Simple helper to ensure trace messages show up even if logging isn't configured for INFO.
+def _trace(msg: str):
+    log_info(msg)
+    print(msg, flush=True)
+
+
+def _mg_trace_enabled() -> bool:
+    v = os.getenv("CUROBO_MOTION_GEN_TRACE", "")
+    return v not in ("", "0", "false", "False", "no", "NO")
+
+
+def _mg_trace_cuda_sync_enabled() -> bool:
+    v = os.getenv("CUROBO_MOTION_GEN_TRACE_CUDA_SYNC", "")
+    return v in ("1", "true", "True", "yes", "YES")
+
+
+class _MGTimer:
+    def __init__(self, enabled: bool, device: torch.device, prefix: str):
+        self.enabled = enabled
+        self.device = device
+        self.prefix = prefix
+        self.cuda_sync = enabled and _mg_trace_cuda_sync_enabled()
+        self.start = time.perf_counter()
+        self.last = self.start
+
+    def _sync(self):
+        if not self.cuda_sync:
+            return
+        if torch.cuda.is_available() and self.device.type == "cuda":
+            torch.cuda.synchronize(device=self.device)
+
+    def mark(self, label: str):
+        if not self.enabled:
+            return
+        self._sync()
+        now = time.perf_counter()
+        _trace(
+            f"{self.prefix} {label}: +{(now - self.last):.6f}s "
+            f"(t={(now - self.start):.6f}s)"
+        )
+        self.last = now
+
+
 from curobo.wrap.reacher.evaluator import TrajEvaluator, TrajEvaluatorConfig
 from curobo.wrap.reacher.ik_solver import IKResult, IKSolver, IKSolverConfig
 from curobo.wrap.reacher.trajopt import TrajOptResult, TrajOptSolver, TrajOptSolverConfig
@@ -221,7 +267,7 @@ class MotionGenConfig:
         graph_trajopt_iters: Optional[int] = None,
         collision_max_outside_distance: Optional[float] = None,
         collision_activation_distance: Optional[float] = None,
-        trajopt_dt: Optional[float] = None,
+        trajopt_dt: Optional[float] = 0.25,
         js_trajopt_dt: Optional[float] = None,
         js_trajopt_tsteps: Optional[int] = None,
         trim_steps: Optional[List[int]] = None,
@@ -233,7 +279,7 @@ class MotionGenConfig:
         finetune_dt_scale: float = 0.9,
         minimum_trajectory_dt: Optional[float] = None,
         maximum_trajectory_time: Optional[float] = None,
-        maximum_trajectory_dt: Optional[float] = None,
+        maximum_trajectory_dt: Optional[float] = 0.15,
         velocity_scale: Optional[Union[List[float], float]] = None,
         acceleration_scale: Optional[Union[List[float], float]] = None,
         jerk_scale: Optional[Union[List[float], float]] = None,
@@ -1554,7 +1600,12 @@ class MotionGen(MotionGenConfig):
             MotionGenResult: Result of motion generation. Check :attr:`MotionGenResult.success`
                 attribute to see if the query was successful.
         """
-        log_info("Planning for Single Goal: " + str(goal_pose.batch))
+        plan_start = time.time()
+        _trace(
+            f"Planning for Single Goal: {goal_pose.batch}, attempts={plan_config.max_attempts}, "
+            f"graph={plan_config.enable_graph}, trajopt_seeds={plan_config.num_trajopt_seeds}, "
+            f"graph_seeds={plan_config.num_graph_seeds}, dt_scale={plan_config.finetune_dt_scale}"
+        )
         solve_state = self._get_solve_state(
             ReacherSolveType.SINGLE, plan_config, goal_pose, start_state
         )
@@ -1565,6 +1616,20 @@ class MotionGen(MotionGenConfig):
             goal_pose,
             plan_config,
             link_poses=link_poses,
+        )
+        _trace(
+            "plan_single timings: total={:.3f}s solve={:.3f}s ik={:.3f}s graph={:.3f}s "
+            "trajopt={:.3f}s trajopt_attempts={} attempts={} status={} success={}".format(
+                time.time() - plan_start,
+                getattr(result, "total_time", float("nan")),
+                getattr(result, "ik_time", float("nan")),
+                getattr(result, "graph_time", float("nan")),
+                getattr(result, "trajopt_time", float("nan")),
+                getattr(result, "trajopt_attempts", "n/a"),
+                getattr(result, "attempts", "n/a"),
+                getattr(result, "status", None),
+                result.success[0].item() if hasattr(result, "success") else None,
+            )
         )
         return result
 
@@ -3054,6 +3119,7 @@ class MotionGen(MotionGenConfig):
             "graph_time": 0,
             "trajopt_time": 0,
             "trajopt_attempts": 0,
+            "finetune_time": 0,
         }
         best_status = 0
         if plan_config.finetune_dt_scale is None:
@@ -3072,6 +3138,21 @@ class MotionGen(MotionGenConfig):
             time_dict["graph_time"] += result.graph_time
             time_dict["trajopt_time"] += result.trajopt_time
             time_dict["trajopt_attempts"] += result.trajopt_attempts
+            time_dict["finetune_time"] += result.finetune_time
+            _trace(
+                "MG Iter {} result: success={} status={} solve={:.3f}s "
+                "(ik={:.3f}s graph={:.3f}s trajopt={:.3f}s finetune={:.3f}s trajopt_attempts={})".format(
+                    n,
+                    result.success[0].item(),
+                    result.status,
+                    result.solve_time,
+                    result.ik_time,
+                    result.graph_time,
+                    result.trajopt_time,
+                    result.finetune_time,
+                    result.trajopt_attempts,
+                )
+            )
             if (
                 result.status == MotionGenStatus.IK_FAIL and plan_config.ik_fail_return is not None
             ):  # IF IK fails the first time, we exist assuming the goal is not reachable
@@ -3126,6 +3207,7 @@ class MotionGen(MotionGenConfig):
         result.graph_time = time_dict["graph_time"]
         result.trajopt_time = time_dict["trajopt_time"]
         result.trajopt_attempts = time_dict["trajopt_attempts"]
+        result.finetune_time = time_dict["finetune_time"]
         result.attempts = n + 1
         torch.cuda.synchronize(device=self.tensor_args.device)
         if plan_config.pose_cost_metric is not None:
@@ -3137,6 +3219,19 @@ class MotionGen(MotionGenConfig):
             )
 
         result.total_time = time.time() - start_time
+        _trace(
+            "MG summary: attempts={} total={:.3f}s solve={:.3f}s ik={:.3f}s "
+            "graph={:.3f}s trajopt={:.3f}s finetune={:.3f}s trajopt_attempts={}".format(
+                result.attempts,
+                result.total_time,
+                result.solve_time,
+                result.ik_time,
+                result.graph_time,
+                result.trajopt_time,
+                result.finetune_time,
+                result.trajopt_attempts,
+            )
+        )
         return result
 
     def _plan_batch_attempts(
@@ -3307,6 +3402,12 @@ class MotionGen(MotionGenConfig):
         Returns:
             MotionGenResult: Result of planning.
         """
+        trace_timer = _MGTimer(
+            enabled=_mg_trace_enabled(),
+            device=self.tensor_args.device,
+            prefix="MG_TRACE _plan_from_solve_state",
+        )
+        trace_timer.mark("begin")
         trajopt_seed_traj = None
         trajopt_seed_success = None
         trajopt_newton_iters = None
@@ -3330,14 +3431,7 @@ class MotionGen(MotionGenConfig):
             plan_config.partial_ik_opt,
             link_poses,
         )
-        # Print IK result details for debugging
-        print("[DEBUG] IKResult.success:", ik_result.success)
-        if hasattr(ik_result, 'status'):
-            print("[DEBUG] IKResult.status:", ik_result.status)
-        if hasattr(ik_result, 'error_message'):
-            print("[DEBUG] IKResult.error_message:", ik_result.error_message)
-        if hasattr(ik_result, 'solution'):
-            print("[DEBUG] IKResult.solution shape:", getattr(ik_result.solution, 'shape', None))
+        trace_timer.mark("ik_done")
 
         if not plan_config.enable_graph and plan_config.partial_ik_opt:
             ik_result.success[:] = True
@@ -3353,14 +3447,11 @@ class MotionGen(MotionGenConfig):
             result.debug_info = {"ik_result": ik_result}
         ik_success = torch.count_nonzero(ik_result.success)
         if ik_success == 0:
-            print("[DEBUG] IK failed. IKResult details:")
-            print("[DEBUG] IKResult.success:", ik_result.success)
-            if hasattr(ik_result, 'status'):
-                print("[DEBUG] IKResult.status:", ik_result.status)
-            if hasattr(ik_result, 'error_message'):
-                print("[DEBUG] IKResult.error_message:", ik_result.error_message)
-            if hasattr(ik_result, 'solution'):
-                print("[DEBUG] IKResult.solution shape:", getattr(ik_result.solution, 'shape', None))
+            if trace_timer.enabled:
+                _trace(
+                    "MG_TRACE _plan_from_solve_state ik_failed: "
+                    f"success={ik_result.success} solve_time={ik_result.solve_time}"
+                )
             result.status = MotionGenStatus.IK_FAIL
             return result
 
@@ -3376,6 +3467,7 @@ class MotionGen(MotionGenConfig):
             start_config = tensor_repeat_seeds(start_state.position, ik_out_seeds)
             if plan_config.enable_opt:
                 self._trajopt_goal_config[:] = ik_result.solution
+        trace_timer.mark("post_ik_done")
 
         # do graph search:
         if plan_config.enable_graph:
@@ -3389,6 +3481,7 @@ class MotionGen(MotionGenConfig):
             graph_success = torch.count_nonzero(graph_result.success).item()
             result.graph_time = graph_result.solve_time
             result.solve_time += graph_result.solve_time
+            trace_timer.mark("graph_done")
             if graph_success > 0:
                 log_info("MG: GP Success")
                 result.graph_plan = graph_result.interpolated_plan
@@ -3525,6 +3618,7 @@ class MotionGen(MotionGenConfig):
                         self.trajopt_solver.action_horizon,
                         self._dof,
                     ).contiguous()
+            trace_timer.mark("trajopt_seed_setup_done")
             if plan_config.enable_finetune_trajopt:
                 og_value = self.trajopt_solver.interpolation_type
                 self.trajopt_solver.interpolation_type = InterpolateType.LINEAR_CUDA
@@ -3596,6 +3690,7 @@ class MotionGen(MotionGenConfig):
                 traj_result.success = traj_result.success[0:1]
                 # if torch.count_nonzero(result.success) == 0:
                 result.status = MotionGenStatus.TRAJOPT_FAIL
+            trace_timer.mark("trajopt_done")
             result.solve_time += traj_result.solve_time + result.finetune_time
             result.trajopt_time = traj_result.solve_time
             result.trajopt_attempts = 1
@@ -3621,6 +3716,22 @@ class MotionGen(MotionGenConfig):
             result.optimized_dt = traj_result.optimized_dt
             result.optimized_plan = traj_result.solution
             result.goalset_index = traj_result.goalset_index
+            trace_timer.mark("postprocess_done")
+
+        if trace_timer.enabled:
+            unexplained = result.solve_time - (
+                float(result.ik_time)
+                + float(result.graph_time)
+                + float(result.trajopt_time)
+                + float(result.finetune_time)
+            )
+            _trace(
+                "MG_TRACE _plan_from_solve_state summary: "
+                f"solve={result.solve_time:.6f}s "
+                f"(ik={float(result.ik_time):.6f}s graph={float(result.graph_time):.6f}s "
+                f"trajopt={float(result.trajopt_time):.6f}s finetune={float(result.finetune_time):.6f}s "
+                f"unexplained={unexplained:.6f}s)"
+            )
         return result
 
     def _plan_js_from_solve_state(
